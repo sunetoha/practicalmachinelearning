@@ -1,0 +1,167 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "sunetoha"
+date: "November 6, 2016"
+output: html_document
+---
+
+```{r, comment = NA, message = F, error = F, warning = F, echo = F}
+library(knitr)
+opts_chunk$set(message = F, error = F, warning = F, comment = NA)
+# install needed packages
+library(caret); library(randomForest)
+```
+
+## Synopsis:  
+In this analysis I prepare a machine learning algorithm to determine whether an excercise is being performed correctly.  Volunteers perform the excercises either correctly or one of four different incorrect excercises. We will use measurement from various sensors placed on their bodies to determine whether they are doing the excercise right. Presumably, when an excercise is perfomed incorrectly, an alert could be triggered, prompting the subject to correct their technique.  I am provided a large training set and a small test set.  My task is to predict whether the each subject in the test set was doing the excercise right or wrong, and which type of wrong excercise they were doing. These five outcomes are encoded A, B, C, D, and E.  I first preprocess the data using a low variance filter, and then I divide the training data into a training and quiz set.  I will use the quiz set to cross validate the results and to estimate an out-of-sample error rate. I start with a linear discriminate model, which I use to select features of interest, which are then passed on to a random forest machine learning algorithm. I chose to do random forest because it has a high prediction accuracy, while not requiring expert knowledge in the field of excercise physiology. I chose not to include the identity of the volunteers in the training set because I did not want the algorithm to be overfit to these particular individuals.
+
+## Prepare the data:
+```{r}
+# Set the working directory:
+setwd("~/Google Drive/DSS/mac-learn/project")
+# Download the data:
+train_link<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+test_link<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+while(!file.exists("pml-training.csv")){
+      download.file(url=train_link, method="curl", destfile = "pml-training.csv")
+}
+while(!file.exists("pml-testing.csv")){
+      download.file(url=test_link, method="curl", destfile = "pml-testing.csv")
+}
+# Read the data into R
+training <- read.csv("pml-training.csv", header = TRUE, 
+                     na.strings = c("#DIV/0!", "NA", ""), 
+                     stringsAsFactors = FALSE)
+testing <- read.csv("pml-testing.csv", header = TRUE, 
+                    na.strings = c("#DIV/0!", "NA", ""), 
+                    stringsAsFactors = FALSE)
+```
+
+**Preprocess the dataset:**
+```{r}
+# Assign factor status to obvious factors:
+training$user_name <- as.factor(training$user_name)
+training$new_window <- as.factor(training$new_window)
+training$classe <- as.factor(training$classe)
+```
+
+
+**Filter the dataset to remove NA and low variance variables:**  
+        The first filters I tried were to remove variables with near zero variance, which identified 36 variables with low variance. 
+```{r, cache = TRUE}
+length(nearZeroVar(training))
+```
+Many variables still remained, even though they had substantial percentages of NA. Examples of these variables are: "kurtosis roll arm" and "skewness pitch arm". These variables had data only in records that were "yes" for the factor "new window".  These observations may not be important in our goal, because none of the 20 member test set is "new window".  Our model will perform better if the training data is analagous to the data we are going to use to predict. For this reason, I feel that the extra data present in the "new window" records are extraneous for our goals.
+```{r}
+length(nearZeroVar(training[training$new_window == "yes",]))
+length(nearZeroVar(training[training$new_window == "no",]))
+```
+        The "new window" observations provide enough variance in many of the variables to pass the near zero variance filter. To avoid this problem, I applied the near zero variance filter to a set that contains only records that are not "new window". This allowed me to remove all of the NA in the dataset quickly. This will remove 101 variables that are unlikely to be helpful. In this way I can remove 65 variables beyond the initial 36 that were identified by the nearZeroVariance filter.
+**Count the NA records before and after the Variance filter:**
+```{r}
+training_na_count <- sum(sapply(training, 
+                       function(y) sum(length(which(is.na(y))))))
+training_na_count
+```
+**Run the Variance Filter**
+```{r}
+# Prepare a subset of the data that is not "new windows"
+not_new_windows <- training[training$new_window == "no",]
+# Apply a variance filter to the not new windows dataset, and use it to 
+# subset select varibles from the whole training set:
+nzv_filtered <- training[,-nearZeroVar(not_new_windows)]
+# Count the number of NA in the new dataset:
+na_count <- sum(sapply(nzv_filtered, 
+                       function(y) sum(length(which(is.na(y))))))
+na_count
+```
+
+This technique had the advantage of removing all of the NA records from the training dataset.
+
+Here I remove several time-stamp and user factors that are incompatible with my linear discriminate analysis. I also remove the identities of the subjects.  I do not want the algorithm to be trained to only discriminate these particular volunteers.  A better algorithm will be able to generalize to larger populations.  For this reason, I remove the identities of the volunteers from the dataset.
+```{r}
+nzv_filtered <- nzv_filtered[,-c(1:6)]
+```
+
+## Modeling the data
+
+**Set up a Training set and a Quiz set for cross-validation**  
+In the interest of having my model be cross-validated, I divide the training set into training and quiz sets. I will train the algorithm on the training set, and evaluate quiz set to determine the out-of-sample error rate.
+```{r}
+set.seed(412)
+inTrain <- createDataPartition(y=nzv_filtered$classe,
+                              p=0.7, list=FALSE)
+train_set <- nzv_filtered[inTrain,]
+quiz_set <- nzv_filtered[-inTrain,]
+```
+
+**Prepare a linear discriminate analysis model:**  
+I begin with a linear discriminate model.  While these models are relatively simple, they are computationally easy, and can be used to quickly determine which variables would be best to use in more sophisticated models. An added benefit is that I can run this model on all 53 of the remaining variables simultaneously.
+```{r, cache = TRUE}
+set.seed(412)
+lda_modelFit <- train(classe ~ ., data = train_set, method = "lda", 
+                  preProcess = c("scale", "center"))
+```
+
+**Use the lda model to make predictions on the quiz set**
+```{r}
+lda_predictions <- predict(lda_modelFit, newdata = quiz_set)
+confusionMatrix(quiz_set$classe, lda_predictions)[2:3]
+```
+Here we see that the linear discriminate model was fairly decent at multiple classification. It was 70% accurate, which is not bad considering the light computational requirements. I next determine the relative importance of the variables in the linear discriminate analysis.
+
+**Extract the most relevant variables to pass to random forest:**
+```{r, cache = TRUE}
+ldaProfile <- rfe(train_set[,-53], train_set[,53], sizes = c(1:10),
+                  rfeControl = rfeControl(functions = ldaFuncs, 
+                                          method = "cv"))
+
+ldaProfile$optVariables
+```
+**Prepare a new training set with fewer variables**
+```{r}
+predictors <- ldaProfile$optVariables[1:15]
+# I prepare a new training set containing only the selected variables with 
+# the classe to use in a random forest model.
+train_set15 <- train_set[,colnames(train_set) %in% c(predictors, "classe")]
+```
+
+### Prepare a random forest model:
+I will use the information obtained in the linear discriminate analysis do decide which variables to include in the random forest. I could just use all of the variables, but I have limited computing power.
+```{r, cache = TRUE}
+library(caret)
+rf_modelFit <- train(classe~., data = train_set15, method = "rf")
+```
+
+**Use the random forest model to make predictions on the quiz set:**
+```{r}
+rf_predictions <- predict(rf_modelFit, quiz_set)
+confusionMatrix(quiz_set$classe, rf_predictions)[2:3]
+```
+
+**Extract the variable importance data from the random forest model:**
+```{r, cache = TRUE}
+varImp(rf_modelFit)
+```
+
+
+**Estimate the out-of-sample error rate:**  
+Because the accuracy on the cross validation set (the quiz set) was 97.84%, I would expect an error rate of approximately 2.16%. This assumes that any additional data used by the algorithm was acquired under similar circumstances to the training set.
+
+## Make predictions on the 20 record test set:
+
+**Preprocess the test set data exactly as I preprocessed the training set:**
+```{r}
+testing$user_name <- as.factor(testing$user_name)
+testing$new_window <- as.factor(testing$new_window)
+testing_filtered <- testing[,-nearZeroVar(not_new_windows)]
+testing_filtered <- testing[,-c(1:6)]
+```
+
+**Prepare the predictions**
+```{r}
+test_predictions <- predict(rf_modelFit, newdata = testing_filtered)
+names(test_predictions) <- testing_filtered$problem_id
+# Print out the predictions:
+test_predictions
+```
